@@ -18,8 +18,84 @@ app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
     service: "Mukamah AI Brain",
-    provider: "Groq"
+    provider: "Groq",
+    search: "LangSearch"
   });
+});
+
+// Mukamah AI Web Search API
+app.post("/api/search", async (req, res) => {
+  try {
+    if (!process.env.LANGSEARCH_API_KEY) {
+      return res.status(500).json({
+        error: "LangSearch API key is not configured."
+      });
+    }
+
+    const { query } = req.body;
+
+    if (!query || typeof query !== "string" || !query.trim()) {
+      return res.status(400).json({
+        error: "Search query is required."
+      });
+    }
+
+    const response = await fetch(
+      "https://api.langsearch.com/v1/web-search",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.LANGSEARCH_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          query: query.trim().slice(0, 500),
+          count: 5,
+          contents: {
+            text: {
+              max_characters: 2000
+            }
+          }
+        }),
+        signal: AbortSignal.timeout(30000)
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`LangSearch HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (String(data.code) !== "200") {
+      throw new Error(data.message || "LangSearch search failed.");
+    }
+
+    const results = data.data?.webPages?.value || [];
+
+    if (!results.length) {
+      return res.json({
+        reply: "দুঃখিত, এই বিষয়ে কোনো সার্চ ফলাফল পাওয়া যায়নি।"
+      });
+    }
+
+    const reply = results.map((item, index) => {
+      const title = item.name || "নাম পাওয়া যায়নি";
+      const link = item.url || "";
+      const content = item.text || item.snippet || "বিস্তারিত পাওয়া যায়নি।";
+
+      return `${index + 1}. ${title}\n${content}\nলিংক: ${link}`;
+    }).join("\n\n");
+
+    res.json({ reply });
+
+  } catch (error) {
+    console.error("Search error:", error.message);
+
+    res.status(500).json({
+      error: "Web search failed. Please try again later."
+    });
+  }
 });
 
 app.post("/api/chat", async (req, res) => {
@@ -61,6 +137,7 @@ app.post("/api/chat", async (req, res) => {
 - বন্ধুত্বপূর্ণ, ভদ্র, পরিষ্কার ও সহায়ক হবে।
 - অপ্রয়োজনীয় দীর্ঘ উত্তর দেবে না।
 - কোনো তথ্য না জানলে স্পষ্টভাবে জানাবে।
+- প্রতিটি কথার সাথে উপযুক্ত ইমোজি দিবে।
 
 MUKAMAH BRAND-এর অফিসিয়াল তথ্য:
 
@@ -88,7 +165,7 @@ Mukamah AI-এর নিজস্ব ওয়েবসাইটের লিংক
 - নির্দিষ্ট কোনো লিংক চাইলে শুধু সেই লিংক দেবে।
 - কোনো লিংক বানিয়ে বলবে না।
 - সবসময় Mukamah AI-এর নিজস্ব ব্র্যান্ড পরিচয় বজায় রাখবে।
-- কেউ যদি জিজ্ঞাসা করে তোমার মালিকের নাম কী, তাহলে বলবে: সাজিদ আফনান।`
+- কেউ যদি জিজ্ঞাসা করে তোমার মালিকের নাম কী, তাহলে বলবে: সাজিদ আফনান ও হাফিজ মাহমুদ।`
       },
       ...(Array.isArray(history)
         ? history.slice(-12)
@@ -129,4 +206,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Mukamah AI Brain running on port ${PORT}`);
 });
-         
+    
