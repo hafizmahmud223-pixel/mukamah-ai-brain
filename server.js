@@ -17,21 +17,18 @@ app.get("/", (req, res) => {
 app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
-    service: "Mukamah AI Brain"
+    service: "Mukamah AI Brain",
+    provider: "Groq"
   });
 });
 
 app.post("/api/chat", async (req, res) => {
   try {
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.GROQ_API_KEY) {
       return res.status(500).json({
-        error: "API key is not configured."
+        error: "Groq API key is not configured."
       });
     }
-
-    const client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
-    });
 
     const { message, history = [] } = req.body;
 
@@ -41,27 +38,46 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    const previousMessages = Array.isArray(history)
-      ? history.slice(-12).map(item =>
-          `${item.role === "assistant" ? "Assistant" : "User"}: ${String(item.content || "").slice(0, 4000)}`
-        ).join("\n")
-      : "";
+    const client = new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1"
+    });
 
-    const response = await client.responses.create({
-      model: process.env.OPENAI_MODEL || "gpt-5-mini",
-      instructions: "You are Mukamah AI, a helpful and friendly AI assistant. Reply in the user's language. Give clear, useful and safe answers.",
-      input: `${previousMessages}\nUser: ${message}`
+    const messages = [
+      {
+        role: "system",
+        content: "You are Mukamah AI, a helpful and friendly AI assistant. Reply in the user's language. Give clear, useful and safe answers."
+      },
+      ...(Array.isArray(history)
+        ? history.slice(-12)
+            .filter(item => ["user", "assistant"].includes(item.role))
+            .map(item => ({
+              role: item.role,
+              content: String(item.content || "").slice(0, 4000)
+            }))
+        : []),
+      {
+        role: "user",
+        content: message
+      }
+    ];
+
+    const completion = await client.chat.completions.create({
+      model: process.env.GROQ_MODEL || "openai/gpt-oss-20b",
+      messages,
+      temperature: 0.7
     });
 
     res.json({
-      reply: response.output_text || "দুঃখিত, উত্তর তৈরি করা যায়নি।"
+      reply: completion.choices?.[0]?.message?.content ||
+        "দুঃখিত, উত্তর তৈরি করা যায়নি।"
     });
 
   } catch (error) {
-    console.error("Chat error:", error);
+    console.error("Chat error:", error?.status, error?.code, error?.message);
 
     res.status(500).json({
-      error: "AI request failed. Please check API key and billing."
+      error: "AI request failed. Please check Groq API key, model, and free-tier limits."
     });
   }
 });
@@ -71,3 +87,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Mukamah AI Brain running on port ${PORT}`);
 });
+      
