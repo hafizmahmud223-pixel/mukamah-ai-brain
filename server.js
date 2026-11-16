@@ -28,20 +28,15 @@ function initFirebase() {
   if (!raw) throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON is missing");
   const serviceAccount = JSON.parse(raw);
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    ...(process.env.FIREBASE_STORAGE_BUCKET
-      ? { storageBucket: process.env.FIREBASE_STORAGE_BUCKET }
-      : {})
+    credential: admin.credential.cert(serviceAccount)
   });
 }
 
 let firebaseReady = false;
 let db;
-let bucket;
 try {
   initFirebase();
   db = admin.firestore();
-  bucket = admin.storage().bucket();
   firebaseReady = true;
 } catch (error) {
   console.error("Firebase initialization failed:", error.message);
