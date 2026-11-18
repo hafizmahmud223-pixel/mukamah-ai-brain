@@ -322,7 +322,7 @@ textarea{width:100%;resize:none;min-height:48px;max-height:130px;background:tran
 
 <script>
 // Load Firebase without blocking the app UI. All auth actions await this promise.
-function loadFirebaseScript(src, timeoutMs=10000){return new Promise((resolve,reject)=>{if(document.querySelector('script[data-firebase-src="'+src+'"]')){const existing=document.querySelector('script[data-firebase-src="'+src+'"]');if(existing.dataset.loaded==='1')return resolve();existing.addEventListener('load',resolve,{once:true});existing.addEventListener('error',()=>reject(new Error('Firebase SDK script লোড হয়নি: '+src)),{once:true});return;}const script=document.createElement('script');script.src=src;script.async=true;script.dataset.firebaseSrc=src;const timer=setTimeout(()=>reject(new Error('Firebase SDK লোড হতে সময় বেশি লাগছে। ইন্টারনেট/ব্রাউজার পরীক্ষা করুন।')),timeoutMs);script.onload=()=>{clearTimeout(timer);script.dataset.loaded='1';resolve()};script.onerror=()=>{clearTimeout(timer);reject(new Error('Firebase SDK ডাউনলোড ব্যর্থ। ইন্টারনেট বা gstatic.com সংযোগ পরীক্ষা করুন।'))};document.head.appendChild(script);});}
+function loadFirebaseScript(src, timeoutMs=10000){return new Promise((resolve,reject)=>{if(document.querySelector('script[data-firebase-src="'+src+'"]')){const existing=document.querySelector('script[data-firebase-src="'+src+'"]');if(existing.dataset.loaded==='1')return resolve();existing.addEventListener('load',resolve,{once:true});existing.addEventListener('error',()=>reject(new Error('Firebase SDK script লোড হয়নি: '+src)),{once:true});return;}const script=document.createElement('script');script.crossOrigin='anonymous';script.src=src;script.async=true;script.dataset.firebaseSrc=src;const timer=setTimeout(()=>reject(new Error('Firebase SDK লোড হতে সময় বেশি লাগছে। ইন্টারনেট/ব্রাউজার পরীক্ষা করুন।')),timeoutMs);script.onload=()=>{clearTimeout(timer);script.dataset.loaded='1';resolve()};script.onerror=()=>{clearTimeout(timer);reject(new Error('Firebase SDK ডাউনলোড ব্যর্থ। ইন্টারনেট বা gstatic.com সংযোগ পরীক্ষা করুন।'))};document.head.appendChild(script);});}
 const firebaseSdkPromise=(async()=>{await loadFirebaseScript('https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js');await loadFirebaseScript('https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js')})();
 </script>
 <script>
@@ -492,6 +492,8 @@ window.mukamahUser=null;
 let activeServerChatId=localStorage.getItem('mukamah_server_chat_id')||null;
 let anonymousSignInStarted=false;
 let authBootstrapComplete=false;
+// Do not create a Guest session until Firebase has finished checking a pending Google redirect.
+let redirectResultChecked=false;
 let authReadyPromise=null;
 let guestSignInPromise=null;
 let lastAuthUid=null;
@@ -502,7 +504,7 @@ function applyFirebaseUser(user){
   }
   if(lastAuthUid){activeServerChatId=null;localStorage.removeItem('mukamah_server_chat_id');lastAuthUid=null}
   window.mukamahUser=null;refreshAccountUI();
-  if(authBootstrapComplete&&!anonymousSignInStarted&&!guestSignInPromise){
+  if(authBootstrapComplete&&redirectResultChecked&&!firebase.auth().currentUser&&!anonymousSignInStarted&&!guestSignInPromise){
     anonymousSignInStarted=true;
     guestSignInPromise=firebase.auth().signInAnonymously().then(result=>result.user||firebase.auth().currentUser).catch(e=>{
       anonymousSignInStarted=false;guestSignInPromise=null;console.warn('Guest sign-in:',e);refreshAccountUI();setStatus('অতিথি লগইন চালু হয়নি: '+e.message);return null;
@@ -520,10 +522,22 @@ function initFirebaseAuth(){
     try{
       const auth=await waitForFirebaseReady();
       try{await auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)}catch(e){console.warn('Auth persistence:',e);showSystemError(firebaseAuthMessage(e),'লগইন সংরক্ষণ')}
+      // Listen for auth changes, but keep Guest fallback disabled until the pending
+      // Google redirect has been checked. Otherwise Android can race into a new
+      // anonymous session and leave the interface showing Guest after Google login.
       auth.onAuthStateChanged(user=>{authBootstrapComplete=true;applyFirebaseUser(user)});
-      // Redirect result is processed independently; it must not block guest startup.
-      auth.getRedirectResult().then(result=>{if(result&&result.user)applyFirebaseUser(result.user)}).catch(e=>{showLoginFeedback('Google লগইন সম্পন্ন হয়নি: '+firebaseAuthMessage(e),'error');showSystemError(firebaseAuthMessage(e),'Google Login')});
-      authBootstrapComplete=true;applyFirebaseUser(auth.currentUser);return auth;
+      try{
+        const result=await auth.getRedirectResult();
+        if(result&&result.user)applyFirebaseUser(result.user);
+      }catch(e){
+        showLoginFeedback('Google লগইন সম্পন্ন হয়নি: '+firebaseAuthMessage(e),'error');
+        showSystemError(firebaseAuthMessage(e),'Google Login');
+      }finally{
+        redirectResultChecked=true;
+        authBootstrapComplete=true;
+        applyFirebaseUser(auth.currentUser);
+      }
+      return auth;
     }catch(e){authBootstrapComplete=true;console.warn('Firebase setup:',e);refreshAccountUI();showSystemError(e.message,'Firebase সংযোগ');throw e}
   })();
   authReadyPromise.catch(()=>{});
