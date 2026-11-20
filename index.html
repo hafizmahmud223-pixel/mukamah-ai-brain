@@ -504,19 +504,66 @@ let redirectResultChecked=false;
 let authReadyPromise=null;
 let guestSignInPromise=null;
 let lastAuthUid=null;
-function applyFirebaseUser(user){
-  if(user){
-    if(lastAuthUid&&lastAuthUid!==user.uid){activeServerChatId=null;localStorage.removeItem('mukamah_server_chat_id')}
-    lastAuthUid=user.uid;anonymousSignInStarted=false;guestSignInPromise=null;window.mukamahUser=user.isAnonymous?null:user;refreshAccountUI();if(!user.isAnonymous&&$('loginPanel').style.display==='flex')showLoginSuccess();return;
+let authTransitionInProgress=0;
+const LOGIN_METHOD_KEY='mukamah_login_method_v1';
+function rememberLoginMethod(method,uid){
+  if(!method)return;
+  window.mukamahLoginMethod=method;
+  try{localStorage.setItem(LOGIN_METHOD_KEY,JSON.stringify({method,uid:uid||null}))}catch(_){}
+}
+function restoreLoginMethod(user){
+  if(!user)return '';
+  try{
+    const saved=JSON.parse(localStorage.getItem(LOGIN_METHOD_KEY)||'null');
+    if(saved&&saved.uid===user.uid&&saved.method)return saved.method;
+  }catch(_){}
+  return '';
+}
+function applyFirebaseUser(eventUser){
+  // Firebase's currentUser is the authoritative snapshot. Observer callbacks can
+  // be queued while a popup/redirect/link operation is already changing accounts.
+  const auth=(window.firebase&&firebase.apps&&firebase.apps.length)?firebase.auth():null;
+  const current=auth?auth.currentUser:null;
+  let user=current||eventUser||null;
+
+  // A stale null/anonymous observer callback must never overwrite a newer,
+  // already-confirmed provider account for the same Firebase UID.
+  if(user&&user.isAnonymous&&window.mukamahUser&&!window.mukamahUser.isAnonymous&&
+     window.mukamahUser.uid===user.uid&&authTransitionInProgress>0){
+    user=window.mukamahUser;
   }
-  if(lastAuthUid){activeServerChatId=null;localStorage.removeItem('mukamah_server_chat_id');lastAuthUid=null}
-  window.mukamahUser=null;refreshAccountUI();
-  if(authBootstrapComplete&&redirectResultChecked&&!firebase.auth().currentUser&&!anonymousSignInStarted&&!guestSignInPromise){
-    anonymousSignInStarted=true;
-    guestSignInPromise=firebase.auth().signInAnonymously().then(result=>result.user||firebase.auth().currentUser).catch(e=>{
-      anonymousSignInStarted=false;guestSignInPromise=null;console.warn('Guest sign-in:',e);refreshAccountUI();setStatus('অতিথি লগইন চালু হয়নি: '+e.message);return null;
-    });
+  if(!user&&authTransitionInProgress>0&&window.mukamahUser&&!window.mukamahUser.isAnonymous){
+    user=window.mukamahUser;
   }
+
+  if(user&&!user.isAnonymous){
+    if(lastAuthUid&&lastAuthUid!==user.uid){
+      activeServerChatId=null;localStorage.removeItem('mukamah_server_chat_id');
+    }
+    lastAuthUid=user.uid;
+    anonymousSignInStarted=false;guestSignInPromise=null;
+    window.mukamahUser=user;
+    if(!window.mukamahLoginMethod)window.mukamahLoginMethod=restoreLoginMethod(user);
+    refreshAccountUI();
+    if($('loginPanel').style.display==='flex')showLoginSuccess();
+    return;
+  }
+
+  // A real sign-out or a confirmed anonymous account clears the provider identity.
+  if(user&&user.isAnonymous){
+    if(lastAuthUid&&lastAuthUid!==user.uid){
+      activeServerChatId=null;localStorage.removeItem('mukamah_server_chat_id');
+    }
+    lastAuthUid=user.uid;
+    window.mukamahUser=null;
+  }else if(!user&&authTransitionInProgress===0){
+    if(lastAuthUid){activeServerChatId=null;localStorage.removeItem('mukamah_server_chat_id');lastAuthUid=null}
+    window.mukamahUser=null;
+    window.mukamahLoginMethod='';
+    try{localStorage.removeItem(LOGIN_METHOD_KEY)}catch(_){}
+  }
+  refreshAccountUI();
+  // Guest Firebase auth is created lazily only when a guest sends a chat.
 }
 async function waitForFirebaseReady(){
   try{await firebaseSdkPromise}catch(e){showSystemError(e.message,'Firebase SDK');throw e}
@@ -535,7 +582,7 @@ function initFirebaseAuth(){
       try{
         const result=await auth.getRedirectResult();
         if(result&&result.user){
-          if(result.user.providerData?.some(p=>p.providerId==='google.com'))window.mukamahLoginMethod='Google';
+          if(result.user.providerData?.some(p=>p.providerId==='google.com'))rememberLoginMethod('Google',result.user.uid);
           applyFirebaseUser(result.user);
         }
       }catch(e){
@@ -547,8 +594,8 @@ function initFirebaseAuth(){
         authBootstrapComplete=true;
         if(user&&!user.isAnonymous){
           const provider=user.providerData?.map(p=>p.providerId)||[];
-          if(provider.includes('google.com'))window.mukamahLoginMethod='Google';
-          else if(provider.includes('password'))window.mukamahLoginMethod='Email';
+          if(provider.includes('google.com'))rememberLoginMethod('Google',user.uid);
+          else if(provider.includes('password'))rememberLoginMethod('Email / Gmail',user.uid);
         }
         applyFirebaseUser(user);
       });
@@ -595,6 +642,7 @@ async function loginWithGoogle(){
     showLoginFeedback('Google Login চালু করতে MUKAMAH AI ওয়েবসাইটটি HTTPS (https://) ঠিকানা থেকে খুলতে হবে। HTML ফাইল থেকে Google Redirect চালু হবে না।','info');
     return;
   }
+  authTransitionInProgress++;
   const googleButtons=$('loginPanel').querySelectorAll('button');
   const googleButton=Array.from(googleButtons).find(b=>(b.getAttribute('onclick')||'').includes('loginWithGoogle'));
   if(googleButton){googleButton.disabled=true;googleButton.textContent='Google সংযোগ করা হচ্ছে…'}
@@ -616,9 +664,16 @@ async function loginWithGoogle(){
       if(isAndroid)await current.linkWithRedirect(provider);
       else{await current.linkWithPopup(provider);showLoginSuccess();}
     }else if(isAndroid){await auth.signInWithRedirect(provider);}
-    else{await auth.signInWithPopup(provider);window.mukamahLoginMethod='Google';window.mukamahUser=auth.currentUser&&!auth.currentUser.isAnonymous?auth.currentUser:null;refreshAccountUI();showLoginSuccess();}
+    else{
+      const credential=await auth.signInWithPopup(provider);
+      const signedUser=credential&&credential.user?credential.user:auth.currentUser;
+      if(!signedUser||signedUser.isAnonymous)throw new Error('Google অ্যাকাউন্ট Firebase-এ নিশ্চিত করা যায়নি। আবার লগইন করুন।');
+      rememberLoginMethod('Google',signedUser.uid);
+      applyFirebaseUser(signedUser);
+      showLoginSuccess();
+    }
   }catch(e){showLoginFeedback(firebaseAuthMessage(e),'error');showSystemError(firebaseAuthMessage(e),'Google Login')}
-  finally{if(googleButton){googleButton.disabled=false;googleButton.textContent='🌐 Continue with Google'}}
+  finally{authTransitionInProgress=Math.max(0,authTransitionInProgress-1);if(window.firebase&&firebase.apps.length)applyFirebaseUser(firebase.auth().currentUser);if(googleButton){googleButton.disabled=false;googleButton.textContent='🌐 Continue with Google'}}
 }
 function refreshAccountUI(){
   const b=$('loginMenuButton'),info=$('accountInfo');
@@ -635,7 +690,7 @@ function refreshAccountUI(){
     b.textContent='↪ লগআউট';b.onclick=logoutGoogle;
     const email=user.email||user.displayName||('MUKAMAH ID · '+String(user.uid||'').slice(0,10));
     const providers=(user.providerData||[]).map(p=>p.providerId);
-    let method=window.mukamahLoginMethod||'';
+    let method=window.mukamahLoginMethod||restoreLoginMethod(user)||'';
     if(providers.includes('google.com'))method='Google';
     else if(providers.includes('password'))method='Email / Gmail';
     else if(!method)method='MUKAMAH ID';
@@ -647,7 +702,7 @@ function refreshAccountUI(){
     info.textContent='অতিথি হিসেবে ব্যবহার করছেন';
   }
 }
-async function logoutGoogle(){if(window.firebase)await firebase.auth().signOut();window.mukamahUser=null;window.mukamahLoginMethod='';refreshAccountUI();setStatus('লগআউট হয়েছে।')}
+async function logoutGoogle(){authTransitionInProgress=0;if(window.firebase)await firebase.auth().signOut();window.mukamahUser=null;window.mukamahLoginMethod='';lastAuthUid=null;try{localStorage.removeItem(LOGIN_METHOD_KEY);localStorage.removeItem('mukamah_server_chat_id')}catch(_){}activeServerChatId=null;refreshAccountUI();setStatus('লগআউট হয়েছে।')}
 function attachSelectedFile(input){
   const file=input.files&&input.files[0];if(!file)return;
   if(file.type.startsWith('image/')){
@@ -669,6 +724,7 @@ function showMukamahIdAuth(){$('mukamahIdFields').style.display='block';$('email
 async function mukamahIdAuth(create){
  const username=$('mukamahUsername').value.trim(),password=$('mukamahPassword').value;
  if(!username||!password)return showLoginFeedback('MUKAMAH ID ও পাসওয়ার্ড—দুটিই লিখুন।');
+ authTransitionInProgress++;
  const buttons=$('mukamahIdFields').querySelectorAll('button');buttons.forEach(b=>b.disabled=true);showLoginFeedback(create?'নতুন MUKAMAH ID তৈরি হচ্ছে…':'MUKAMAH ID দিয়ে লগইন হচ্ছে…','info');
  try{
   await waitForFirebaseReady();
@@ -678,11 +734,12 @@ async function mukamahIdAuth(create){
   const d=await readApiJson(r,'MUKAMAH ID API');
   if(!r.ok)throw new Error(d.error||'MUKAMAH ID প্রক্রিয়া সম্পন্ন হয়নি (HTTP '+r.status+')');
   if(!d.token)throw new Error('সার্ভার থেকে Login Token পাওয়া যায়নি। Backend-এর MUKAMAH ID সেটআপ পরীক্ষা করুন।');
-  await firebase.auth().signInWithCustomToken(d.token);window.mukamahLoginMethod='MUKAMAH ID';window.mukamahUser=firebase.auth().currentUser;refreshAccountUI();showLoginSuccess();
- }catch(e){showLoginFeedback(e.message||'MUKAMAH ID লগইন সম্পন্ন হয়নি।','error');showSystemError(e.message||'MUKAMAH ID লগইন সম্পন্ন হয়নি।','MUKAMAH ID')}finally{buttons.forEach(b=>b.disabled=false)}
+  const credentialResult=await firebase.auth().signInWithCustomToken(d.token);const signedUser=credentialResult&&credentialResult.user?credentialResult.user:firebase.auth().currentUser;if(!signedUser||signedUser.isAnonymous)throw new Error('MUKAMAH ID অ্যাকাউন্ট Firebase-এ নিশ্চিত করা যায়নি।');rememberLoginMethod('MUKAMAH ID',signedUser.uid);applyFirebaseUser(signedUser);showLoginSuccess();
+ }catch(e){showLoginFeedback(e.message||'MUKAMAH ID লগইন সম্পন্ন হয়নি।','error');showSystemError(e.message||'MUKAMAH ID লগইন সম্পন্ন হয়নি।','MUKAMAH ID')}finally{authTransitionInProgress=Math.max(0,authTransitionInProgress-1);if(window.firebase&&firebase.apps.length)applyFirebaseUser(firebase.auth().currentUser);buttons.forEach(b=>b.disabled=false)}
 }
 function showEmailAuth(){$('emailAuthFields').style.display='block';$('mukamahIdFields').style.display='none'}
-async function emailSignIn(create){const email=$('authEmail'),pass=$('authPassword');email.classList.remove('field-invalid');pass.classList.remove('field-invalid');const e=email.value.trim(),p=pass.value;if(!e){email.classList.add('field-invalid');showLoginFeedback('ইমেইল লিখুন। উদাহরণ: name@gmail.com');email.focus();return}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)){email.classList.add('field-invalid');showLoginFeedback('ইমেইল ঠিকানাটি সঠিক নয়। আবার পরীক্ষা করুন।');email.focus();return}if(!p){pass.classList.add('field-invalid');showLoginFeedback('পাসওয়ার্ড লিখুন।');pass.focus();return}const buttons=$('emailAuthFields').querySelectorAll('button');buttons.forEach(b=>b.disabled=true);showLoginFeedback(create?'আপনার অ্যাকাউন্ট তৈরি করা হচ্ছে…':'আপনাকে লগইন করানো হচ্ছে…','info');try{const auth=await waitForFirebaseReady();if(authReadyPromise)await authReadyPromise;if(guestSignInPromise)await guestSignInPromise;if(create){const current=auth.currentUser;if(current&&current.isAnonymous){const credential=firebase.auth.EmailAuthProvider.credential(e,p);await current.linkWithCredential(credential)}else await auth.createUserWithEmailAndPassword(e,p)}else{await auth.signInWithEmailAndPassword(e,p)}window.mukamahLoginMethod='Email / Gmail';window.mukamahUser=auth.currentUser&&!auth.currentUser.isAnonymous?auth.currentUser:null;refreshAccountUI();showLoginSuccess()}catch(x){const msg=firebaseAuthMessage(x);if(x.code==='auth/wrong-password'||x.code==='auth/invalid-credential')pass.classList.add('field-invalid');if(x.code==='auth/user-not-found'||x.code==='auth/invalid-email')email.classList.add('field-invalid');showLoginFeedback(msg,'error');showSystemError(msg,'Email Login/Signup')}finally{buttons.forEach(b=>b.disabled=false)}}
+async function emailSignIn(create){
+const email=$('authEmail'),pass=$('authPassword');email.classList.remove('field-invalid');pass.classList.remove('field-invalid');const e=email.value.trim(),p=pass.value;if(!e){email.classList.add('field-invalid');showLoginFeedback('ইমেইল লিখুন। উদাহরণ: name@gmail.com');email.focus();return}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)){email.classList.add('field-invalid');showLoginFeedback('ইমেইল ঠিকানাটি সঠিক নয়। আবার পরীক্ষা করুন।');email.focus();return}if(!p){pass.classList.add('field-invalid');showLoginFeedback('পাসওয়ার্ড লিখুন।');pass.focus();return}authTransitionInProgress++;const buttons=$('emailAuthFields').querySelectorAll('button');buttons.forEach(b=>b.disabled=true);showLoginFeedback(create?'আপনার অ্যাকাউন্ট তৈরি করা হচ্ছে…':'আপনাকে লগইন করানো হচ্ছে…','info');try{const auth=await waitForFirebaseReady();if(authReadyPromise)await authReadyPromise;if(guestSignInPromise)await guestSignInPromise;let credentialResult;if(create){const current=auth.currentUser;if(current&&current.isAnonymous){const credential=firebase.auth.EmailAuthProvider.credential(e,p);credentialResult=await current.linkWithCredential(credential)}else credentialResult=await auth.createUserWithEmailAndPassword(e,p)}else{credentialResult=await auth.signInWithEmailAndPassword(e,p)}const signedUser=credentialResult&&credentialResult.user?credentialResult.user:auth.currentUser;if(!signedUser||signedUser.isAnonymous)throw new Error('ইমেইল অ্যাকাউন্ট Firebase-এ নিশ্চিত করা যায়নি। আবার চেষ্টা করুন।');rememberLoginMethod('Email / Gmail',signedUser.uid);applyFirebaseUser(signedUser);showLoginSuccess()}catch(x){const msg=firebaseAuthMessage(x);if(x.code==='auth/wrong-password'||x.code==='auth/invalid-credential')pass.classList.add('field-invalid');if(x.code==='auth/user-not-found'||x.code==='auth/invalid-email')email.classList.add('field-invalid');showLoginFeedback(msg,'error');showSystemError(msg,'Email Login/Signup')}finally{authTransitionInProgress=Math.max(0,authTransitionInProgress-1);if(window.firebase&&firebase.apps.length)applyFirebaseUser(firebase.auth().currentUser);buttons.forEach(b=>b.disabled=false)}}
 async function resetEmailPassword(){const input=$('authEmail');input.classList.remove('field-invalid');const e=input.value.trim();if(!e){input.classList.add('field-invalid');input.focus();return showLoginFeedback('পাসওয়ার্ড রিসেট করতে আগে ইমেইল লিখুন।')}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)){input.classList.add('field-invalid');input.focus();return showLoginFeedback('ইমেইল ঠিকানাটি সঠিক নয়।')}try{const auth=await waitForFirebaseReady();await auth.sendPasswordResetEmail(e);showLoginFeedback('পাসওয়ার্ড রিসেটের ইমেইল পাঠানো হয়েছে। Inbox ও Spam ফোল্ডার দেখুন।','info')}catch(x){showLoginFeedback(firebaseAuthMessage(x),'error');showSystemError(firebaseAuthMessage(x),'Password Reset')}}
 function openUpgrade(){$('packageOptions').innerHTML='';$('upgradePanel').style.display='flex';toggleMenu(false)}function closeUpgrade(){$('upgradePanel').style.display='none'}
 async function showPackages(type){let box=$('packageOptions');if(type==='student'){if(!window.mukamahUser){closeUpgrade();openLogin();return}try{let token=await firebase.auth().currentUser.getIdToken();let r=await fetch((cfg.apiUrl||DEFAULT_CHAT_API).replace('/api/chat','/api/student/status'),{headers:{Authorization:'Bearer '+token}});let d=await readApiJson(r,'API');if(!r.ok)throw Error(d.error||'Student status পাওয়া যায়নি');if(d.status!=='approved'){box.innerHTML='<h3>Student Premium যাচাই</h3><p>Student প্যাকেজ কেনার আগে আপনার Student পরিচয় যাচাই করতে হবে। আবেদন জমা দিয়ে Owner-এর অনুমোদনের জন্য অপেক্ষা করুন।</p><button class="menu-item" onclick="openStudentApply()">🎓 Student Verification আবেদন</button>';return}}catch(e){box.innerHTML='<p>'+escapeHTML(e.message)+'</p><button class="menu-item" onclick="openStudentApply()">Student Verification</button>';return}}
